@@ -20,7 +20,7 @@ Clone the repository:
 ```bash
 git clone <repository-url>
 
-cd simplesurance-challenge/
+cd request-counter/
 go build .
 go run .
 ```
