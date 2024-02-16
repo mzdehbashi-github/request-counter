@@ -8,21 +8,20 @@ import (
 	"time"
 )
 
-// Define a constant for the duration of the window
-const windowDuration = 60 * time.Second
-
 // RequestCounter maintains a counter for the total number of requests received in the past 60 seconds.
 type RequestCounter struct {
-	Requests map[int64]int // Map to store request counts with timestamp
-	Mutex    sync.RWMutex  // ReadWrite Mutex to ensure read and write safety
-	filename string
+	Requests       map[int64]int // Map to store request counts with timestamp
+	Mutex          sync.RWMutex  // ReadWrite Mutex to ensure read and write safety
+	filename       string
+	windowDuration time.Duration // duration in seconds
 }
 
 // NewRequestCounter initializes a new RequestCounter.
-func NewRequestCounter(filename string) *RequestCounter {
+func NewRequestCounter(filename string, windowDuration time.Duration) *RequestCounter {
 	rc := &RequestCounter{
-		Requests: make(map[int64]int),
-		filename: filename,
+		Requests:       make(map[int64]int),
+		filename:       filename,
+		windowDuration: windowDuration,
 	}
 
 	// Load previous data from file if available
@@ -50,7 +49,7 @@ func (rc *RequestCounter) CountRequests() int {
 	rc.Mutex.RLock()
 	defer rc.Mutex.RUnlock()
 	for timestamp, reqCount := range rc.Requests {
-		if timestamp >= currentTimestamp-int64(windowDuration.Seconds()) {
+		if timestamp >= currentTimestamp-int64(rc.windowDuration.Seconds()) {
 			count += reqCount
 		}
 	}
@@ -89,7 +88,7 @@ func (rc *RequestCounter) LoadFromFile() error {
 
 func (rc *RequestCounter) DeleteOldData() {
 	rc.Mutex.Lock()
-	expiredTimestamp := time.Now().Unix() - (int64(windowDuration.Seconds()) - 1)
+	expiredTimestamp := time.Now().Unix() - (int64(rc.windowDuration.Seconds()) - 1)
 	for timestamp := range rc.Requests {
 		if timestamp < expiredTimestamp {
 			delete(rc.Requests, timestamp)

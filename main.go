@@ -12,8 +12,11 @@ import (
 	"time"
 )
 
-const saveToFileDuration = 10 * time.Second
-const removeOldKeysDuration = 60 * time.Second
+const (
+	rcWindowDuration      = 60 * time.Second
+	saveToFileDuration    = 10 * time.Second
+	removeOldKeysDuration = 60 * time.Second
+)
 
 func savePeriodically(ctx context.Context, rc *RequestCounter, wg *sync.WaitGroup, duration time.Duration) {
 	defer wg.Done()
@@ -73,41 +76,48 @@ func startHTTPServer(ctx context.Context, server *http.Server, wg *sync.WaitGrou
 	log.Println("Server gracefully stopped")
 }
 
+type HttpHandler struct {
+	rc *RequestCounter
+}
+
+func (hh *HttpHandler) CounRequests(w http.ResponseWriter, r *http.Request) {
+	hh.rc.Increment()
+	count := hh.rc.CountRequests()
+
+	// Create a struct to represent the JSON response
+	type Response struct {
+		Count int `json:"count"`
+	}
+
+	// Create an instance of the Response struct with the count value
+	jsonResponse := Response{Count: count}
+
+	// Encode the struct into JSON format
+	jsonResponseBytes, err := json.Marshal(jsonResponse)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	// Set the content type as JSON
+	w.Header().Set("Content-Type", "application/json")
+
+	// Write the JSON response back to the client
+	w.WriteHeader(http.StatusOK)
+	_, err = w.Write(jsonResponseBytes)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+}
+
 func main() {
 	filename := "request_counter.gob"
-	rc := NewRequestCounter(filename)
+	rc := NewRequestCounter(filename, rcWindowDuration)
+	httpHandler := &HttpHandler{rc: rc}
 
 	// Define HTTP handler function
-	http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
-		rc.Increment()
-		count := rc.CountRequests()
-
-		// Create a struct to represent the JSON response
-		type Response struct {
-			Count int `json:"count"`
-		}
-
-		// Create an instance of the Response struct with the count value
-		jsonResponse := Response{Count: count}
-
-		// Encode the struct into JSON format
-		jsonResponseBytes, err := json.Marshal(jsonResponse)
-		if err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
-			return
-		}
-
-		// Set the content type as JSON
-		w.Header().Set("Content-Type", "application/json")
-
-		// Write the JSON response back to the client
-		w.WriteHeader(http.StatusOK)
-		_, err = w.Write(jsonResponseBytes)
-		if err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
-			return
-		}
-	})
+	http.HandleFunc("/", httpHandler.CounRequests)
 
 	// Create a new HTTP server
 	server := &http.Server{
