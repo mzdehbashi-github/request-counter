@@ -7,31 +7,75 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"sync"
 	"syscall"
 	"time"
 )
 
+const saveToFileDuration = 10 * time.Second
+const removeOldKeysDuration = 60 * time.Second
+
+func savePeriodically(ctx context.Context, rc *RequestCounter, wg *sync.WaitGroup, duration time.Duration) {
+	defer wg.Done()
+	ticker := time.NewTicker(duration)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ticker.C:
+			rc.SaveToFile()
+		case <-ctx.Done():
+			log.Println("Saving routine cancelled, saving data for the last time")
+			// Save one last time before exiting
+			rc.SaveToFile()
+			return
+		}
+	}
+}
+
+func removeOldKeysPeriodically(ctx context.Context, rc *RequestCounter, wg *sync.WaitGroup, duration time.Duration) {
+	defer wg.Done()
+	ticker := time.NewTicker(duration)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ticker.C:
+			rc.DeleteOldData()
+		case <-ctx.Done():
+			log.Println("Removing old keys routine cancelled")
+			return
+		}
+	}
+}
+
+func startHTTPServer(ctx context.Context, server *http.Server, wg *sync.WaitGroup) {
+	defer wg.Done()
+
+	go func() {
+		log.Println("Server listening on port 8080...")
+		if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+			log.Fatal("Error starting server:", err)
+		}
+	}()
+
+	// Listen for termination signals to gracefully shutdown the server
+	<-ctx.Done()
+
+	// Attempt to gracefully shutdown the server
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	if err := server.Shutdown(shutdownCtx); err != nil {
+		log.Fatal("Error shutting down server:", err)
+	}
+
+	log.Println("Server gracefully stopped")
+}
+
 func main() {
 	filename := "request_counter.gob"
 	rc := NewRequestCounter(filename)
-
-	// Save data periodically
-	go func() {
-		for {
-			time.Sleep(10 * time.Second)
-			if err := rc.SaveToFile(); err != nil {
-				log.Fatal("Error saving data to file:", err)
-			}
-		}
-	}()
-
-	// Remove old keys periodically
-	go func() {
-		for {
-			time.Sleep(60 * time.Second)
-			rc.DeleteOldData()
-		}
-	}()
 
 	// Define HTTP handler function
 	http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
@@ -65,44 +109,37 @@ func main() {
 		}
 	})
 
-	// Create a new HTTP server with graceful shutdown
+	// Create a new HTTP server
 	server := &http.Server{
 		Addr: ":8080",
 	}
 
-	// Start HTTP server in a separate goroutine
-	go func() {
-		log.Println("Server listening on port 8080...")
-		if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-			log.Fatal("Error starting server:", err)
-		}
-	}()
+	// Context for managing graceful shutdown of all goroutines
+	ctx, cancel := context.WithCancel(context.Background())
 
-	// Listen for termination signals to gracefully shutdown the server
-	// Here the trade-off is in case of safe termination (i.e. ctrl+c or k8s sending SIGTERM)
-	// we do not lose the state of the request counter and we will save it's state to the file
-	// for the last time. But if a panic happens between the intervals of saving state of request counter
-	// to the file, then it's state will be lost.
-	quit := make(chan os.Signal, 1)
-	signal.Notify(quit, os.Interrupt, syscall.SIGTERM)
-	<-quit
-	log.Println("Shutting down server...")
+	// Wait group to make sure all goroutines are getting terminated,
+	// before the main thread is terminated.
+	var wg sync.WaitGroup
 
-	// Create a context with a timeout to allow in-flight requests to finish
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
+	// Increment the WaitGroup for each goroutine:
+	// - savePeriodically
+	// - removeOldKeysPeriodically
+	// - startHTTPServer
+	wg.Add(3)
+	go savePeriodically(ctx, rc, &wg, saveToFileDuration)
+	go removeOldKeysPeriodically(ctx, rc, &wg, removeOldKeysDuration)
+	go startHTTPServer(ctx, server, &wg)
 
-	// Attempt to gracefully shutdown the server
-	if err := server.Shutdown(ctx); err != nil {
-		log.Fatal("Error shutting down server:", err)
-	}
+	// Listen for termination signals to cancel the context
+	signalCh := make(chan os.Signal, 1)
+	signal.Notify(signalCh, os.Interrupt, syscall.SIGTERM)
 
-	// Attempt to store the last state of request counter
-	log.Println("Storing the last state of request counter...")
-	err := rc.SaveToFile()
-	if err != nil {
-		log.Fatal("Could not store the last state of request counter sucessfully", err)
-	}
+	// Wait for termination signals or cancellation of context
+	<-signalCh
+	log.Println("Received termination signal, cancelling context...")
+	cancel()
 
-	log.Println("Server gracefully stopped")
+	// Wait for all goroutines to finish gracefully
+	wg.Wait()
+	log.Println("main gracefully stopped")
 }
