@@ -19,10 +19,6 @@ func TestHttpHandler_CountRequests(t *testing.T) {
 	rc := NewRequestCounter(filename, rcWindowDuration)
 	httpHandler := &HttpHandler{rc: rc}
 
-	// Create a new HTTP request recorder,
-	// to use for the first 10 requests
-	initialRecorder := httptest.NewRecorder()
-
 	// Simulate sending 10 concurrent requests
 	var wg sync.WaitGroup
 	wg.Add(10)
@@ -34,7 +30,11 @@ func TestHttpHandler_CountRequests(t *testing.T) {
 				t.Errorf("Error creating request: %v", err)
 				return
 			}
-			httpHandler.CounRequests(initialRecorder, req)
+
+			// Create a new HTTP request recorder,
+			// for every call to the handler.
+			recorder := httptest.NewRecorder()
+			httpHandler.CounRequests(recorder, req)
 		}()
 	}
 	wg.Wait()
