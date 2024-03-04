@@ -16,6 +16,10 @@ const (
 	rcWindowDuration      = 60 * time.Second
 	saveToFileDuration    = 10 * time.Second
 	removeOldKeysDuration = 60 * time.Second
+
+	maxConcurrentRequests = 5
+	sleepDuration         = 2 * time.Second // simulation of the time that takes to process each request
+	timeOutDuration       = 2 * time.Second // The amount of time to wait on each request, before sending timeout
 )
 
 func savePeriodically(ctx context.Context, rc *RequestCounter, wg *sync.WaitGroup, duration time.Duration) {
@@ -77,47 +81,62 @@ func startHTTPServer(ctx context.Context, server *http.Server, wg *sync.WaitGrou
 }
 
 type HttpHandler struct {
-	rc *RequestCounter
+	rc             *RequestCounter
+	concurrentReqs chan struct{} // acts as a semaphore
 }
 
-func (hh *HttpHandler) CounRequests(w http.ResponseWriter, r *http.Request) {
-	hh.rc.Increment()
-	count := hh.rc.CountRequests()
+func (hh *HttpHandler) CountRequests(w http.ResponseWriter, r *http.Request) {
+	select {
+	case hh.concurrentReqs <- struct{}{}:
+		defer func() { <-hh.concurrentReqs }()
 
-	// Create a struct to represent the JSON response
-	type Response struct {
-		Count int `json:"count"`
-	}
+		hh.rc.Increment()
+		count := hh.rc.CountRequests()
 
-	// Create an instance of the Response struct with the count value
-	jsonResponse := Response{Count: count}
+		// Simulate processing time
+		time.Sleep(sleepDuration)
 
-	// Encode the struct into JSON format
-	jsonResponseBytes, err := json.Marshal(jsonResponse)
-	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
-		return
-	}
+		// Create a struct to represent the JSON response
+		type Response struct {
+			Count int `json:"count"`
+		}
 
-	// Set the content type as JSON
-	w.Header().Set("Content-Type", "application/json")
+		// Create an instance of the Response struct with the count value
+		jsonResponse := Response{Count: count}
 
-	// Write the JSON response back to the client
-	w.WriteHeader(http.StatusOK)
-	_, err = w.Write(jsonResponseBytes)
-	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
-		return
+		// Encode the struct into JSON format
+		jsonResponseBytes, err := json.Marshal(jsonResponse)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+
+		// Set the content type as JSON
+		w.Header().Set("Content-Type", "application/json")
+
+		// Write the JSON response back to the client
+		w.WriteHeader(http.StatusOK)
+		_, err = w.Write(jsonResponseBytes)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+
+	case <-time.After(timeOutDuration):
+		http.Error(w, "Timeout: Unable to acquire semaphore", http.StatusRequestTimeout)
 	}
 }
 
 func main() {
 	filename := "request_counter.gob"
 	rc := NewRequestCounter(filename, rcWindowDuration)
-	httpHandler := &HttpHandler{rc: rc}
+	httpHandler := &HttpHandler{
+		rc:             rc,
+		concurrentReqs: make(chan struct{}, maxConcurrentRequests),
+	}
 
 	// Define HTTP handler function
-	http.HandleFunc("/", httpHandler.CounRequests)
+	http.HandleFunc("/", httpHandler.CountRequests)
 
 	// Create a new HTTP server
 	server := &http.Server{
